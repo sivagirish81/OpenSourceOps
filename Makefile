@@ -12,7 +12,7 @@ setup:
 	$(PIP) install -r requirements.txt
 
 init_snowflake:
-	$(PY) -m src.snowflake_client --init
+	$(PY) -c "from storage.snowflake_store import SnowflakeStore; s=SnowflakeStore(); s.ensure_schema(); print('Snowflake schema initialized')"
 
 run:
 	$(VENV)/bin/streamlit run app/main.py
