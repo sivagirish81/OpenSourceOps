@@ -1,59 +1,108 @@
 # OpenSourceOps
 
-OpenSourceOps is an autonomous Open Source Intelligence web application and multi-agent pipeline for evaluating and operationalizing open-source ecosystems. It supports the **Developer / Contributor** persona by identifying high-impact repositories and contribution opportunities in a chosen domain, scoring opportunities, and generating a weekly contribution plan focused on measurable reputation impact.
+OpenSourceOps is a Snowflake-backed OSS Due Diligence platform for companies evaluating open source software before adoption. The product captures company context, scouts the best candidate repositories, runs a multi-agent due diligence analysis, and produces a grounded decision report with prioritized owner-assigned next steps.
 
-It also supports the **Company / Adopter** persona by discovering candidate projects, computing maturity and risk signals, generating a structured 30/60/90 adoption playbook with Snowflake Cortex `AI_COMPLETE`, and optionally publishing the playbook to Notion through Composio with explicit user confirmation.
+The application is built as a Streamlit-first system where Streamlit handles both UI and backend orchestration. Snowflake is the mandatory system of record for company profiles, scouting runs, ingestion metadata, evidence chunks, findings, final reports, and agent transcripts.
+
+The repository indexing subsystem uses a **Signal-Based Evidence Index**. It does not clone and embed full source trees. Instead, it collects high-signal GitHub metadata and key governance/ops files (README/docs/SECURITY/LICENSE/CI/deploy configs), then applies deterministic parsers to extract features with citations.
+
+## Core Workflow
+
+1. Company onboarding with industry-standard due diligence inputs.
+2. Context-aware scouting returns Top 3 repositories with explainable scores.
+3. User selects one repository.
+4. Repo ingestion captures commit SHA, file manifest, evidence chunks, and budget usage.
+5. Multi-agent due diligence run produces GO / CONDITIONAL_GO / NO_GO report.
+
+## Product Scope
+
+- Company-only (no contributor mode).
+- No adoption playbook output. Focus is due diligence decision quality.
+- Grounded Answer Contract enforced for findings and report.
 
 ## Architecture
 
 ```text
-[Streamlit UI]
-   |
-   | Run Analysis (Domain, Language, Mode)
-   v
-[CoordinatorAgent] ---> [RUN_LOG]
-   |
-   +--> [ScoutAgent] ----> GitHub Search API ----> REPOS / ISSUES
-   |
-   +--> [AnalystAgent] --> scoring.py -----------> REPO_SCORES / ISSUE_SCORES
-   |
-   +--> [StrategistAgent] -> Snowflake AI_COMPLETE -> REPO_AI / DOMAIN_AI
-   |
-   +--> [CoordinatorAgent] -> Composio (optional) -> Notion page URL
+Streamlit App (UI + Backend)
+  |
+  +-- SnowflakeStore (mandatory persistence)
+  |     +-- COMPANY_PROFILES
+  |     +-- SCOUTING_RUNS
+  |     +-- REPO_CANDIDATES
+  |     +-- REPO_INGESTIONS
+  |     +-- REPO_EVIDENCE
+  |     +-- REPO_SIGNALS
+  |     +-- DUE_DILIGENCE_RUNS
+  |     +-- FINDINGS
+  |     +-- REPORTS
+  |     +-- AGENT_TRANSCRIPTS
+  |
+  +-- ScoutingAgent
+  +-- RepoLibrarianAgent
+  +-- SecuritySupplyChainAgent
+  +-- LicenseComplianceAgent
+  +-- ReliabilityOpsAgent
+  +-- ArchitectureIntegrationAgent
+  +-- CommunityMaintenanceAgent
+  +-- JudgeVerifierAgent
+  |
+  +-- Composio (optional task creation)
+  +-- CrewAI (orchestration integration with deterministic fallback)
 ```
 
-## Repository Layout
+## Grounded Answer Contract
 
-- `/app/main.py` Streamlit web app
-- `/src/github_client.py` GitHub repo + issues discovery
-- `/src/query_pack.py` domain-to-query generation
-- `/src/snowflake_client.py` Snowflake connection + insert/select helpers + setup CLI
-- `/src/scoring.py` deterministic scoring formulas
-- `/src/ai.py` Snowflake `AI_COMPLETE` wrappers + JSON parsing + markdown renderer
-- `/src/agents.py` four agents (Scout, Analyst, Strategist, Coordinator)
-- `/src/composio_integration.py` Notion creation with dry-run mode
-- `/src/run_logger.py` RUN_LOG helper
-- `/sql/setup.sql` database/schema/tables
-- `/tests/` dry-run sanity tests
+For every claim:
+
+- Include citations (`repo URL + file path + line range` or document section).
+- Include confidence (`High | Medium | Low`).
+- If evidence is weak/missing, output exactly:
+  - `Not confirmed from repo evidence`
+  - plus `next_checks` list.
+- Do not assert unsupported capabilities without evidence.
+
+## Context-Aware Severity Model
+
+Each finding includes:
+
+- `base_severity`
+- `context_multiplier`
+- `adjusted_severity`
+- `multiplier_rationale`
+
+Severity is adjusted based on company profile requirements (for example, SOC2 + required audit logs + low risk tolerance increases security severity).
+
+## Repository Structure
+
+- [app/main.py](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/app/main.py): Streamlit pages and orchestration entrypoint.
+- [storage/snowflake_store.py](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/storage/snowflake_store.py): mandatory typed Snowflake persistence layer.
+- [storage/schema.sql](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/storage/schema.sql): Snowflake schema DDL.
+- [src/due_diligence_agents.py](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/src/due_diligence_agents.py): context-aware agents, grounding checks, judge/verifier, report schema validation.
+- [src/due_diligence_pipeline.py](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/src/due_diligence_pipeline.py): scouting, ingestion, due diligence run functions.
+- [src/evidence_collector.py](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/src/evidence_collector.py): lightweight GitHub evidence collection with strict caps.
+- [src/evidence_parsers.py](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/src/evidence_parsers.py): deterministic signal extractors and citation-backed features.
+- [src/github_client.py](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/src/github_client.py): GitHub repository discovery.
+- [tests/](/Users/sivagirish/Documents/Work/Project/OpenSourceOps/tests): pytest test suite.
 
 ## Setup
 
-Prerequisite: Python `3.10` to `3.12` (recommended: `3.11` or `3.12`). Python `3.13+` is currently not supported by some upstream dependencies.
+Prerequisite: Python `3.10` - `3.12`.
 
-1. Copy `.env.example` to `.env` and fill values.
-2. Run:
+1. Copy `.env.example` to `.env`.
+2. Set Snowflake and GitHub credentials.
+3. Install dependencies:
 
 ```bash
 make setup
 ```
 
-3. Initialize Snowflake tables (optional but recommended when credentials exist):
+4. Initialize Snowflake schema:
 
 ```bash
 make init_snowflake
 ```
 
-4. Start app:
+5. Start app:
 
 ```bash
 make run
@@ -61,71 +110,87 @@ make run
 
 ## Environment Variables
 
-Required for full live mode:
+Required:
 
 - `GITHUB_TOKEN`
-- Optional GitHub rate-limit knobs:
-  - `GITHUB_MAX_SEARCH_QUERIES` (default `2`)
-  - `GITHUB_TOP_K_REPOS` (default `25`)
-  - `GITHUB_PER_QUERY_PAGE_SIZE` (default `15`)
-  - `GITHUB_ISSUE_REPO_LIMIT` (default `5`)
-  - `GITHUB_ISSUES_PER_REPO` (default `10`)
-  - `GITHUB_FETCH_CONTRIBUTORS` (default `false`; set `true` to add contributor count API calls)
-- `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_WAREHOUSE`, and one of:
-  - `SNOWFLAKE_PASSWORD`, or
-  - `SNOWFLAKE_PRIVATE_KEY`
-- `SNOWFLAKE_DATABASE` (default `OPENSOURCEOPS`), `SNOWFLAKE_SCHEMA` (default `PUBLIC`)
-- `COMPOSIO_API_KEY`
-- `NOTION_DATABASE_ID` or `NOTION_PARENT_PAGE_ID`
-- `COMPOSIO_NOTION_INTEGRATION_ID` (if required by your Composio workspace)
+- `SNOWFLAKE_ACCOUNT`
+- `SNOWFLAKE_USER`
+- `SNOWFLAKE_PASSWORD` or `SNOWFLAKE_PRIVATE_KEY`
+- `SNOWFLAKE_ROLE`
+- `SNOWFLAKE_WAREHOUSE`
+- `SNOWFLAKE_DATABASE` (default `OPENSOURCEOPS`)
+- `SNOWFLAKE_SCHEMA` (default `PUBLIC`)
 
-When credentials are missing, OpenSourceOps uses dry-run behavior and logs intended actions to `RUN_LOG`.
+Optional:
 
-## Quickstart Flow
+- `COMPOSIO_API_KEY` (task creation integration)
+- `SKYFIRE_MAX_FILES` (default `50`)
+- `SKYFIRE_MAX_TOKENS` (default `120000`)
+- `INDEX_MINIMAL_MAX_FILES` (default `20`)
+- `INDEX_STANDARD_MAX_FILES` (default `50`)
+- `MAX_FILES` (default `80`)
+- `MAX_BYTES` (default `8388608`)
+- `MAX_DOC_FILES` (default `35`)
+- `MAX_WORKFLOW_FILES` (default `20`)
 
-1. Launch app with `make run`.
-2. In sidebar set:
-   - Domain: `RAG evaluation`
-   - Language: `Python` (optional)
-   - Mode: `Enterprise` or `Contributor`
-3. Click **Run Analysis**.
-4. Open **Repositories** tab to inspect ranked repos with health/risk/maturity and AI summaries.
-5. Open **Adoption Playbook** tab to view generated markdown playbook.
-6. Click **Create Notion Playbook**:
-   - Review preview modal payload.
-   - Check confirmation box.
-   - Execute dry-run (if no Composio key) or live Notion page creation.
-7. In **Run Log** tab, verify full Scout -> Analyst -> Strategist -> Coordinator trace.
+## Streamlit Pages
 
-## Tests
+1. Company Onboarding
+2. Scouting Results (Top 3)
+3. Repo Selection + Ingestion Progress
+4. Due Diligence Dashboard
+5. War Room Transcript
+
+## Due Diligence Output
+
+Validated report JSON contains:
+
+- `decision` (`GO` / `CONDITIONAL_GO` / `NO_GO`)
+- `risk_register` with adjusted severities and context rationales
+- `prioritized_next_steps` with owners/effort
+- `maintainer_questions`
+
+Exports:
+
+- JSON
+- Markdown
+
+## Demo Script
+
+1. Open **Company Onboarding** and create profile:
+   - Industry: FinTech
+   - Frameworks: SOC2, GDPR
+   - Risk tolerance: Low
+   - Require commercial support: Yes
+2. Open **Scouting Results**:
+   - Requirements: "Need durable workflow orchestration with auditability and production reliability."
+   - Run scouting and inspect Top 3 score breakdown.
+3. Select one repo and move to **Repo Selection + Ingestion**:
+   - Choose indexing depth:
+     - Minimal (fast): ~10-30s, indexes ~10-20 most important files
+     - Standard: ~30-90s, caps at ~50 key files
+   - Indexing also includes small high-signal context from latest releases, recent issues, and recent discussions.
+   - Start background ingestion and monitor progress/chunk availability.
+   - You can navigate away; ingestion continues in background and persists to Snowflake.
+4. Open **Due Diligence Dashboard**:
+   - Run due diligence with available chunks (partial allowed), then rerun after indexing completes for fuller coverage.
+   - Review decision, risk register, owner-assigned next steps, and maintainer questions.
+   - Download JSON/Markdown exports.
+5. Open **War Room Transcript**:
+   - Review agent-by-agent outputs and judge resolution trace.
+
+## Testing
+
+Run tests:
 
 ```bash
 make test
 ```
 
-- `test_github_dryrun.py`: validates query pack and token-aware GitHub client setup.
-- `test_snowflake_dryrun.py`: validates Snowflake dry-run or connection ability.
+Coverage includes:
 
-## GitHub Actions
-
-The repository includes two lightweight workflows that run on GitHub-hosted `ubuntu-latest` runners and are compatible with GitHub's free-tier Actions usage:
-
-- `.github/workflows/ci.yml`
-  - Triggers on pull requests and pushes to `main`/`master`
-  - Installs dependencies, runs Python syntax checks, and executes `pytest`
-- `.github/workflows/deploy-check.yml`
-  - Triggers on pushes to `main` and manual dispatch
-  - Re-runs syntax and test checks as a deployment readiness gate
-
-## Limitations
-
-- GitHub issue difficulty/reputation scoring is heuristic and intentionally simple.
-- `AI_COMPLETE` function signatures can vary by Snowflake account version; fallback path handles this.
-- Composio action payloads may require adjustment based on SDK version and workspace tool naming.
-
-## Roadmap Ideas
-
-1. Add richer contributor matching by skill tags and issue embeddings.
-2. Add incremental Snowflake upserts and dedupe keys.
-3. Add automatic weekly digest export (email/Slack/Notion).
-4. Add model evaluation checks for JSON schema conformance.
+- Snowflake schema creation and store write/read mock happy path.
+- Citation enforcement and missing-evidence fallback.
+- Context multiplier logic.
+- Judge deduplication.
+- Report JSON schema validation.
