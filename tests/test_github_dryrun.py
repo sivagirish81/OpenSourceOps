@@ -5,7 +5,12 @@ from src.query_pack import generate_query_pack
 
 
 def test_query_pack_generation():
-    pack = generate_query_pack("RAG evaluation", language="Python")
+    pack = generate_query_pack(
+        domain="RAG evaluation",
+        intent="Need robust evaluation pipeline for enterprise adoption",
+        constraints={"language": "Python"},
+        persona="Adopter",
+    )
     assert pack.domain == "RAG evaluation"
     assert len(pack.queries) >= 3
     assert any("pushed:>2024-01-01" in q for q in pack.queries)

@@ -1,101 +1,211 @@
 # OpenSourceOps
 
-OpenSourceOps is an autonomous Open Source Intelligence web application and multi-agent pipeline for evaluating and operationalizing open-source ecosystems. It supports the **Developer / Contributor** persona by identifying high-impact repositories and contribution opportunities in a chosen domain, scoring opportunities, and generating a weekly contribution plan focused on measurable reputation impact.
+OpenSourceOps is an intent-driven open-source intelligence platform for two primary workflows: **Company Adopter** and **Open-Source Contributor**. It discovers and evaluates GitHub repositories, computes deterministic maturity/risk signals, and generates persona-specific strategy outputs through a 4-agent orchestration pipeline.
 
-It also supports the **Company / Adopter** persona by discovering candidate projects, computing maturity and risk signals, generating a structured 30/60/90 adoption playbook with Snowflake Cortex `AI_COMPLETE`, and optionally publishing the playbook to Notion through Composio with explicit user confirmation.
+The system supports iterative, feedback-driven refinement with auditability. Users can refine specific sections (recommendations, risk analysis, plans, opportunities) and regenerate either with full re-discovery or AI-only updates, while preserving a run history and justification trail.
+
+For Adopter mode, the Adoption Playbook tab now includes a **Repo Deep-Dive Chat** bound to a selected repository and commit SHA. The chat is evidence-grounded over repo docs/code/config/releases and enforces a strict answer contract (direct answer, citations, confidence, and next checks when evidence is weak).
+
+## Personas
+
+### 1) Company / Adopter
+- Input: domain + intent + constraints
+- Output: ranked repositories, maturity/risk analysis, alternatives, and tailored 30/60/90 adoption playbook
+- Optional action: export playbook to Notion via Composio (preview + confirmation)
+
+### 2) Developer / Contributor
+- Input: domain + intent + constraints
+- Output: ranked repositories and **Top Contribution Opportunities** from GitHub issues + discussions (with fallback when discussions unavailable), plus weekly contribution plan
 
 ## Architecture
 
 ```text
 [Streamlit UI]
-   |
-   | Run Analysis (Domain, Language, Mode)
-   v
-[CoordinatorAgent] ---> [RUN_LOG]
-   |
-   +--> [ScoutAgent] ----> GitHub Search API ----> REPOS / ISSUES
-   |
-   +--> [AnalystAgent] --> scoring.py -----------> REPO_SCORES / ISSUE_SCORES
-   |
-   +--> [StrategistAgent] -> Snowflake AI_COMPLETE -> REPO_AI / DOMAIN_AI
-   |
-   +--> [CoordinatorAgent] -> Composio (optional) -> Notion page URL
+  - Persona toggle, intent input, constraints, feedback refine controls
+  - Adopter tabs: Repositories, Adoption Playbook, Run Log
+  - Contributor tabs: Repositories, Opportunities, Contribution Plan, Run Log
+
+[CoordinatorAgent]
+  - Decides full re-search vs AI-only regeneration
+  - Maintains changes & justification
+  - Handles Notion export action
+
+[ScoutAgent]
+  - Query optimizer via Snowflake Cortex AI_COMPLETE
+  - GitHub repo discovery (rate-limit capped)
+  - Contributor mode: issues + discussions retrieval
+
+[AnalystAgent]
+  - Deterministic repo scoring + intent-match scoring
+  - Opportunity scoring (engagement, recency, relevance, scope, ease)
+
+[StrategistAgent]
+  - Per-repo AI summaries
+  - Adopter playbook OR contributor plan generation
+
+[Snowflake]
+  - Persistence, run context, feedback, action logs, cache retrieval
+  - Evidence index + chat traces + eval logs for grounded repo Q&A
+
+[Repo Deep-Dive Chat]
+  - Ingest selected GitHub repo URL (+ optional tag/branch)
+  - Build semantic evidence index with metadata (path/lines/symbol/type)
+  - Hybrid retrieval (BM25 lexical + embedding similarity)
+  - RetrieverAgent -> VerifierAgent -> WriterAgent contract enforcement
 ```
 
 ## Repository Layout
 
-- `/app/main.py` Streamlit web app
-- `/src/github_client.py` GitHub repo + issues discovery
-- `/src/query_pack.py` domain-to-query generation
-- `/src/snowflake_client.py` Snowflake connection + insert/select helpers + setup CLI
-- `/src/scoring.py` deterministic scoring formulas
-- `/src/ai.py` Snowflake `AI_COMPLETE` wrappers + JSON parsing + markdown renderer
-- `/src/agents.py` four agents (Scout, Analyst, Strategist, Coordinator)
-- `/src/composio_integration.py` Notion creation with dry-run mode
-- `/src/run_logger.py` RUN_LOG helper
-- `/sql/setup.sql` database/schema/tables
-- `/tests/` dry-run sanity tests
+- `/app/main.py`: Streamlit app (persona-adaptive UX + feedback regeneration)
+- `/src/github_client.py`: GitHub REST/GraphQL discovery
+- `/src/query_pack.py`: domain/intent/constraints query generation
+- `/src/snowflake_client.py`: Snowflake persistence, typed inserts, cache retrieval
+- `/src/scoring.py`: deterministic repository/opportunity scoring
+- `/src/ai.py`: Cortex AI wrappers (optimizer + persona outputs)
+- `/src/agents.py`: Scout/Analyst/Strategist/Coordinator orchestration
+- `/src/composio_integration.py`: Notion export (preview/dry-run/live)
+- `/src/run_logger.py`: run trace helper
+- `/src/repo_chat.py`: repo ingestion, hybrid retrieval, grounded chat pipeline
+- `/src/store.py`: SnowflakeStore + LocalStore adapters for playbooks/evidence/chat traces
+- `/src/chat_api.py`: FastAPI endpoints for repo indexing and `/chat`
+- `/sql/setup.sql`: schema and table setup
+- `/tests/`: dry-run sanity tests
 
 ## Setup
 
-Prerequisite: Python `3.10` to `3.12` (recommended: `3.11` or `3.12`). Python `3.13+` is currently not supported by some upstream dependencies.
+Prerequisite: Python `3.10` to `3.12` (recommended: `3.11` or `3.12`).
 
-1. Copy `.env.example` to `.env` and fill values.
-2. Run:
+1. Copy `.env.example` to `.env` and set credentials.
+2. Install dependencies:
 
 ```bash
 make setup
 ```
 
-3. Initialize Snowflake tables (optional but recommended when credentials exist):
+3. Initialize Snowflake schema:
 
 ```bash
 make init_snowflake
 ```
 
-4. Start app:
+4. Run app:
 
 ```bash
 make run
 ```
 
+5. (Optional) Run chat API endpoint:
+
+```bash
+make run_api
+```
+
 ## Environment Variables
 
-Required for full live mode:
-
+### Required for full live mode
 - `GITHUB_TOKEN`
-- Optional GitHub rate-limit knobs:
-  - `GITHUB_MAX_SEARCH_QUERIES` (default `2`)
-  - `GITHUB_TOP_K_REPOS` (default `25`)
-  - `GITHUB_PER_QUERY_PAGE_SIZE` (default `15`)
-  - `GITHUB_ISSUE_REPO_LIMIT` (default `5`)
-  - `GITHUB_ISSUES_PER_REPO` (default `10`)
-  - `GITHUB_FETCH_CONTRIBUTORS` (default `false`; set `true` to add contributor count API calls)
-- `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_WAREHOUSE`, and one of:
-  - `SNOWFLAKE_PASSWORD`, or
-  - `SNOWFLAKE_PRIVATE_KEY`
-- `SNOWFLAKE_DATABASE` (default `OPENSOURCEOPS`), `SNOWFLAKE_SCHEMA` (default `PUBLIC`)
+- `SNOWFLAKE_ACCOUNT`
+- `SNOWFLAKE_USER`
+- `SNOWFLAKE_ROLE` (recommended for dedicated app RBAC)
+- `SNOWFLAKE_WAREHOUSE`
+- One of `SNOWFLAKE_PASSWORD` or `SNOWFLAKE_PRIVATE_KEY`
+- `SNOWFLAKE_DATABASE` (default `OPENSOURCEOPS`)
+- `SNOWFLAKE_SCHEMA` (default `PUBLIC`)
+
+### Optional
 - `COMPOSIO_API_KEY`
 - `NOTION_DATABASE_ID` or `NOTION_PARENT_PAGE_ID`
-- `COMPOSIO_NOTION_INTEGRATION_ID` (if required by your Composio workspace)
+- `COMPOSIO_NOTION_INTEGRATION_ID`
+- `CACHE_TTL_HOURS` (default `6`)
+- `CORTEX_MODEL_PRIMARY` (default `snowflake-arctic`)
+- `CORTEX_MODEL_FALLBACK` (default `mistral-7b`)
 
-When credentials are missing, OpenSourceOps uses dry-run behavior and logs intended actions to `RUN_LOG`.
+### GitHub call throttling (rate-limit safety)
+- `GITHUB_MAX_SEARCH_QUERIES` (max `6`, default `3`)
+- `GITHUB_TOP_K_REPOS` (default `25`)
+- `GITHUB_PER_QUERY_PAGE_SIZE` (default `15`)
+- `GITHUB_ISSUE_REPO_LIMIT` (default `5`)
+- `GITHUB_ISSUES_PER_REPO` (default `10`)
+- `GITHUB_DISCUSSION_REPO_LIMIT` (default `4`)
+- `GITHUB_DISCUSSIONS_PER_REPO` (default `8`)
+- `GITHUB_FETCH_CONTRIBUTORS` (default `false`)
 
-## Quickstart Flow
+When credentials are missing, the app runs in dry-run/fallback mode and records intended actions in run logs.
 
-1. Launch app with `make run`.
-2. In sidebar set:
-   - Domain: `RAG evaluation`
-   - Language: `Python` (optional)
-   - Mode: `Enterprise` or `Contributor`
-3. Click **Run Analysis**.
-4. Open **Repositories** tab to inspect ranked repos with health/risk/maturity and AI summaries.
-5. Open **Adoption Playbook** tab to view generated markdown playbook.
-6. Click **Create Notion Playbook**:
-   - Review preview modal payload.
-   - Check confirmation box.
-   - Execute dry-run (if no Composio key) or live Notion page creation.
-7. In **Run Log** tab, verify full Scout -> Analyst -> Strategist -> Coordinator trace.
+## Caching Behavior
+
+Cache key is computed from:
+- persona
+- domain
+- intent hash
+- constraints hash
+
+Artifacts are persisted and reused for up to `CACHE_TTL_HOURS` (default `6`):
+- optimizer output/query pack
+- repositories and scores
+- opportunities
+- AI outputs
+- repo evidence index chunks
+- chat traces and evaluation logs
+
+`Force refresh` bypasses cache. Feedback regeneration uses intelligent scope:
+- Repo/constraints/opportunity feedback -> full rediscovery
+- Plan/detail feedback -> reuse candidates and regenerate AI outputs only
+
+## Feedback Loop
+
+Each major section exposes **Refine** controls. Feedback is stored in run history and used during regeneration. A **Changes & Justification** section explains whether recommendations changed and why.
+
+## Sample Runs
+
+### Adopter sample
+- Domain: `RAG evaluation`
+- Intent: `We need to adopt a reliable RAG evaluation stack for internal model governance with low operational risk.`
+- Constraints: `language=Python`, `maturity=Stable only`
+
+### Contributor sample
+- Domain: `RAG evaluation`
+- Intent: `I want to contribute to high-impact RAG evaluation tooling to build maintainer trust and portfolio evidence.`
+- Constraints: `language=Python`, `maturity=OK emerging`
+
+## Repo Deep-Dive Chat Contract
+
+For every answer:
+1. Direct answer
+2. Citations (`repo URL + file path + line range`)
+3. `Confidence: High|Medium|Low`
+4. If weak evidence: exact phrase `Not confirmed from repo evidence` + `next_checks`
+5. No capability claims without evidence
+
+### API endpoints
+- `POST /index` with `{"repo_url":"https://github.com/owner/repo","ref":"optional-tag-or-branch"}`
+- `POST /chat` with `{"repoId":"<repo_id>","question":"...","mode":"grounded_qa|scenario_brainstorm|risk_review"}`
+
+### Example questions (A-E)
+1. A: `Where in the code is retry orchestration implemented?`
+2. B: `How do I configure this repo for production deployment?`
+3. C: `Does it support Kafka and Postgres?`
+4. D: `What are the biggest integration risks for adopting this repo?`
+5. E: `What are breaking changes between recent releases?`
+
+Expected response shape:
+```json
+{
+  "answer": "string",
+  "citations": [
+    {
+      "file_path": "string",
+      "start_line": 1,
+      "end_line": 30,
+      "url": "https://github.com/owner/repo/blob/<sha>/path#L1",
+      "snippet": "string"
+    }
+  ],
+  "confidence": "High|Medium|Low",
+  "next_checks": ["string"],
+  "question_type": "A|B|C|D|E"
+}
+```
 
 ## Tests
 
@@ -103,29 +213,13 @@ When credentials are missing, OpenSourceOps uses dry-run behavior and logs inten
 make test
 ```
 
-- `test_github_dryrun.py`: validates query pack and token-aware GitHub client setup.
-- `test_snowflake_dryrun.py`: validates Snowflake dry-run or connection ability.
-
 ## GitHub Actions
 
-The repository includes two lightweight workflows that run on GitHub-hosted `ubuntu-latest` runners and are compatible with GitHub's free-tier Actions usage:
+Free-tier compatible workflows:
+- `.github/workflows/ci.yml` (PR + push checks)
+- `.github/workflows/deploy-check.yml` (deployment readiness gate)
 
-- `.github/workflows/ci.yml`
-  - Triggers on pull requests and pushes to `main`/`master`
-  - Installs dependencies, runs Python syntax checks, and executes `pytest`
-- `.github/workflows/deploy-check.yml`
-  - Triggers on pushes to `main` and manual dispatch
-  - Re-runs syntax and test checks as a deployment readiness gate
+## Known Constraints
 
-## Limitations
-
-- GitHub issue difficulty/reputation scoring is heuristic and intentionally simple.
-- `AI_COMPLETE` function signatures can vary by Snowflake account version; fallback path handles this.
-- Composio action payloads may require adjustment based on SDK version and workspace tool naming.
-
-## Roadmap Ideas
-
-1. Add richer contributor matching by skill tags and issue embeddings.
-2. Add incremental Snowflake upserts and dedupe keys.
-3. Add automatic weekly digest export (email/Slack/Notion).
-4. Add model evaluation checks for JSON schema conformance.
+- GitHub discussions may be unavailable for some repositories/tokens; app falls back to issues-only opportunities and labels this in UI.
+- Snowflake Cortex function signatures vary by account; wrapper handles fallback paths.

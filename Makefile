@@ -3,7 +3,7 @@ VENV := .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: setup init_snowflake run test
+.PHONY: setup init_snowflake run run_api test
 
 setup:
 	@$(PYTHON) -c "import sys; assert (3,10) <= sys.version_info[:2] < (3,13), 'Python 3.10-3.12 required for current dependency set. Install/use python3.11 or python3.12, then rerun make setup.'"
@@ -16,6 +16,9 @@ init_snowflake:
 
 run:
 	$(VENV)/bin/streamlit run app/main.py
+
+run_api:
+	$(PY) -m uvicorn src.chat_api:app --reload --port 8000
 
 test:
 	$(VENV)/bin/pytest -q

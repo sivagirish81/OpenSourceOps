@@ -1,4 +1,4 @@
-"""Composio integration for Notion playbook creation with mandatory dry-run support."""
+"""Composio integration for Notion playbook creation with dry-run support and action logging."""
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ try:
 except Exception:  # pragma: no cover
     Composio = None
 
+from src.run_logger import RunLogger
+from src.snowflake_client import SnowflakeClient
+
 
 def _to_notion_blocks(markdown_text: str) -> list[dict]:
-    """Simple markdown-to-Notion paragraph blocks conversion."""
     blocks = []
     for raw_line in markdown_text.splitlines():
         line = raw_line.strip()
@@ -59,22 +61,26 @@ def create_notion_playbook(
     composio_client: Any,
     run_id: str,
     domain: str,
+    persona: str,
     playbook_md: str,
-    dry_run: bool = True,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Create or preview a Notion page creation payload via Composio SDK."""
+    """Create or preview a Notion page via Composio; logs RUN_ACTIONS and RUN_LOG."""
+    sf = SnowflakeClient()
+    logger = RunLogger(sf)
+
     notion_database_id = os.getenv("NOTION_DATABASE_ID")
     notion_parent_page_id = os.getenv("NOTION_PARENT_PAGE_ID")
-
     payload = {
-        "title": f"OpenSourceOps Playbook - {domain}",
-        "run_id": run_id,
+        "title": f"OpenSourceOps {persona} Output - {domain}",
         "database_id": notion_database_id,
         "parent_page_id": notion_parent_page_id,
         "children": _to_notion_blocks(playbook_md),
     }
 
     if dry_run:
+        sf.save_action(run_id, "CREATE_NOTION_PLAYBOOK", "DRY_RUN", None, "Payload preview only")
+        logger.log(run_id, "CoordinatorAgent", "notion_dry_run", "INFO", "Notion payload generated in dry-run mode")
         return {
             "ok": True,
             "dry_run": True,
@@ -84,6 +90,8 @@ def create_notion_playbook(
         }
 
     if not composio_client:
+        sf.save_action(run_id, "CREATE_NOTION_PLAYBOOK", "FAILED", None, "Composio client not available")
+        logger.log(run_id, "CoordinatorAgent", "notion_create", "FAILED", "Composio client not available")
         return {
             "ok": False,
             "dry_run": False,
@@ -93,25 +101,18 @@ def create_notion_playbook(
         }
 
     try:
-        if hasattr(composio_client, "tools") and hasattr(composio_client.tools, "execute"):
-            response = composio_client.tools.execute(
-                "NOTION_CREATE_PAGE",
-                {
-                    "title": payload["title"],
-                    "database_id": payload["database_id"],
-                    "parent_page_id": payload["parent_page_id"],
-                    "children": payload["children"],
-                },
-            )
-        else:
-            response = {"data": {"url": None}}
-
-        page_url = (
-            (response or {}).get("data", {}).get("url")
-            if isinstance(response, dict)
-            else None
+        response = composio_client.tools.execute(
+            "NOTION_CREATE_PAGE",
+            {
+                "title": payload["title"],
+                "database_id": payload["database_id"],
+                "parent_page_id": payload["parent_page_id"],
+                "children": payload["children"],
+            },
         )
-
+        page_url = (response or {}).get("data", {}).get("url") if isinstance(response, dict) else None
+        sf.save_action(run_id, "CREATE_NOTION_PLAYBOOK", "SUCCESS", page_url, "Notion page created")
+        logger.log(run_id, "CoordinatorAgent", "notion_create", "SUCCESS", f"Notion page created: {page_url}")
         return {
             "ok": True,
             "dry_run": False,
@@ -121,6 +122,8 @@ def create_notion_playbook(
             "raw": response,
         }
     except Exception as exc:
+        sf.save_action(run_id, "CREATE_NOTION_PLAYBOOK", "FAILED", None, str(exc))
+        logger.log(run_id, "CoordinatorAgent", "notion_create", "FAILED", f"Notion create failed: {exc}")
         return {
             "ok": False,
             "dry_run": False,
@@ -131,7 +134,6 @@ def create_notion_playbook(
 
 
 def get_composio_client() -> Any:
-    """Build Composio SDK client if available and configured."""
     api_key = os.getenv("COMPOSIO_API_KEY")
     if not api_key or Composio is None:
         return None
@@ -139,29 +141,3 @@ def get_composio_client() -> Any:
         return Composio(api_key=api_key)
     except Exception:
         return None
-
-
-def create_internal_github_artifact(
-    composio_client: Any,
-    repo: str,
-    title: str,
-    body: str,
-    dry_run: bool = True,
-) -> Dict[str, Any]:
-    """Optional Composio helper to create an internal issue/discussion reference."""
-    payload = {"repo": repo, "title": title, "body": body}
-    if dry_run:
-        return {"ok": True, "dry_run": True, "message": "Dry-run only", "payload": payload}
-    if not composio_client:
-        return {"ok": False, "dry_run": False, "message": "Composio client unavailable", "payload": payload}
-    try:
-        if hasattr(composio_client, "tools") and hasattr(composio_client.tools, "execute"):
-            result = composio_client.tools.execute(
-                "GITHUB_CREATE_ISSUE",
-                {"repo": repo, "title": title, "body": body},
-            )
-        else:
-            result = {}
-        return {"ok": True, "dry_run": False, "message": "GitHub artifact created", "payload": payload, "raw": result}
-    except Exception as exc:
-        return {"ok": False, "dry_run": False, "message": f"GitHub artifact failed: {exc}", "payload": payload}
