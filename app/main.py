@@ -431,6 +431,7 @@ def page_due_diligence(store: SnowflakeStore):
                 ingest_run_id=ingestion["ingest_run_id"],
                 company_profile=profile,
                 repo_meta=repo,
+                requirements=scout.get("requirements", ""),
             )
         st.session_state["last_dd"] = dd
         st.success(f"Due diligence complete. dd_run_id={dd['dd_run_id']}")
