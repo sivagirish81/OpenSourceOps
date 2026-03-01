@@ -759,7 +759,13 @@ class CommunityMaintenanceAgent:
 class JudgeVerifierAgent:
     name = "JudgeVerifierAgent"
 
-    def run(self, company_profile: Dict[str, Any], findings: List[Dict[str, Any]], repo_full_name: str) -> Dict[str, Any]:
+    def run(
+        self,
+        company_profile: Dict[str, Any],
+        findings: List[Dict[str, Any]],
+        repo_full_name: str,
+        requirements: str = "",
+    ) -> Dict[str, Any]:
         normalized = [ensure_grounded_claim(dict(f)) for f in findings]
         deduped = dedupe_findings(normalized)
 
@@ -783,12 +789,37 @@ class JudgeVerifierAgent:
                     "priority": "P1" if f.get("adjusted_severity", 0) >= 0.75 else ("P2" if f.get("adjusted_severity", 0) >= 0.5 else "P3"),
                 }
             )
+        tech = company_profile.get("technical_environment", {})
+        sec = company_profile.get("security_compliance", {})
+        req_tokens = set(tokenize(requirements))
+        db_targets = [str(x) for x in tech.get("databases", [])[:2]]
+        mq_targets = [str(x) for x in tech.get("messaging", [])[:2]]
+        idp = str(tech.get("identity_provider") or "our IdP")
+
         maintainer_questions = [
+            f"For our requirement '{requirements or 'enterprise adoption'}', which production references most closely match this use case?",
             "What is your release and deprecation policy?",
-            "Do you provide commercial support or enterprise SLA?",
-            "What security incident response process do you follow?",
             "Which integrations are officially supported and tested?",
         ]
+        if db_targets or mq_targets:
+            maintainer_questions.append(
+                f"Do you have validated integration patterns for {', '.join(db_targets + mq_targets)}?"
+            )
+        maintainer_questions.append(f"How should we integrate authentication with {idp}?")
+        if sec.get("audit_logs_required"):
+            maintainer_questions.append("Where is audit logging documented and what events are guaranteed?")
+        if sec.get("sbom_required"):
+            maintainer_questions.append("Do you publish SBOM artifacts, and how do you handle vulnerability disclosure timelines?")
+        if {"durable", "workflow", "orchestration", "execution"} & req_tokens:
+            maintainer_questions.append(
+                "How do you guarantee workflow durability, idempotency, and replay safety during partial outages?"
+            )
+        if {"payment", "payments", "checkout", "billing"} & req_tokens:
+            maintainer_questions.append(
+                "What payment reliability controls exist (idempotency keys, reconciliation, retry safety, and double-charge prevention)?"
+            )
+        # Keep a concise prioritized set.
+        maintainer_questions = list(dict.fromkeys(maintainer_questions))[:8]
         report = {
             "decision": decision,
             "repo": repo_full_name,

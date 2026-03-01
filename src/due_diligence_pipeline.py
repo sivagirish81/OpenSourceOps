@@ -134,6 +134,7 @@ def _llm_conversation(
     *,
     agent_name: str,
     repo_name: str,
+    requirements: str,
     notes: Dict[str, Any],
     findings: List[Dict[str, Any]],
     company_profile: Dict[str, Any],
@@ -149,6 +150,7 @@ def _llm_conversation(
         {
             "agent_name": agent_name,
             "repo_name": repo_name,
+            "requirements": requirements,
             "company_profile": company_profile,
             "notes": notes,
             "findings": findings[:3],
@@ -187,6 +189,7 @@ def _llm_enrich_findings(
     llm: LLMRouter,
     *,
     agent_name: str,
+    requirements: str,
     company_profile: Dict[str, Any],
     repo_meta: Dict[str, Any],
     evidence: List[Dict[str, Any]],
@@ -204,6 +207,7 @@ def _llm_enrich_findings(
         {
             "agent_name": agent_name,
             "repo": {"full_name": repo_meta.get("full_name"), "url": repo_meta.get("html_url")},
+            "requirements": requirements,
             "company_profile": company_profile,
             "evidence": evidence,
             "starting_findings": deterministic_findings[:3],
@@ -323,7 +327,7 @@ def run_scouting(
     )
     for cand in result["top3"]:
         store.save_repo_candidate(scout_run_id=scout_run_id, company_id=company_id, candidate=cand)
-    return {"scout_run_id": scout_run_id, **result, "crew_meta": crew_meta}
+    return {"scout_run_id": scout_run_id, "requirements": requirements, **result, "crew_meta": crew_meta}
 
 
 def run_ingestion(
@@ -405,6 +409,7 @@ def run_due_diligence(
     ingest_run_id: str,
     company_profile: Dict[str, Any],
     repo_meta: Dict[str, Any],
+    requirements: str = "",
 ) -> Dict[str, Any]:
     llm = LLMRouter(store)
     dd_run_id = store.create_due_diligence_run(
@@ -470,6 +475,7 @@ def run_due_diligence(
             enriched = _llm_enrich_findings(
                 llm,
                 agent_name=out.agent_name,
+                requirements=requirements,
                 company_profile=company_profile,
                 repo_meta=repo_meta,
                 evidence=evidence_cards,
@@ -498,6 +504,7 @@ def run_due_diligence(
                     llm,
                     agent_name=out.agent_name,
                     repo_name=repo_meta["full_name"],
+                    requirements=requirements,
                     notes=out.notes,
                     findings=out.findings,
                     company_profile=company_profile,
@@ -517,7 +524,12 @@ def run_due_diligence(
         store.save_findings_batch(dd_run_id, out.findings)
 
     judge = JudgeVerifierAgent()
-    report = judge.run(company_profile, findings, repo_meta["full_name"])
+    report = judge.run(
+        company_profile=company_profile,
+        findings=findings,
+        repo_full_name=repo_meta["full_name"],
+        requirements=requirements,
+    )
     report_md = report_to_markdown(report)
     store.save_transcript(
         dd_run_id=dd_run_id,
@@ -536,6 +548,7 @@ def run_due_diligence(
                 llm,
                 agent_name=judge.name,
                 repo_name=repo_meta["full_name"],
+                requirements=requirements,
                 notes={"decision": report.get("decision")},
                 findings=report.get("risk_register", [])[:3],
                 company_profile=company_profile,
