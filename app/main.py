@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -50,18 +51,13 @@ def _safe_state(key: str, default):
     return st.session_state[key]
 
 
-def _snowflake_banner(store: SnowflakeStore):
-    ok, msg = store.test_connection()
-    if ok:
-        st.success("Snowflake connected ✅")
-    else:
-        st.error(f"Snowflake connection failed: {msg}")
-    if st.button("Run connection test"):
-        ok2, msg2 = store.test_connection()
-        if ok2:
-            st.success(msg2)
-        else:
-            st.error(msg2)
+def _reset_downstream_state():
+    """Clear dependent state when company/repo/scout context changes."""
+    st.session_state["last_scout"] = None
+    st.session_state["selected_repo"] = None
+    st.session_state["last_ingestion"] = None
+    st.session_state["last_dd"] = None
+    st.session_state["ingestion_job_id"] = None
 
 
 def _profile_label(item: Dict[str, Any]) -> str:
@@ -179,7 +175,12 @@ def _current_company(store: SnowflakeStore) -> tuple[str | None, Dict[str, Any] 
     default_idx = next((i for i, lbl in enumerate(labels) if options[lbl] == default_id), 0)
     selected_label = st.selectbox("Company profile", labels, index=default_idx)
     company_id = options[selected_label]
+    prev_company = st.session_state.get("_active_company_id")
+    if prev_company and prev_company != company_id:
+        _reset_downstream_state()
+        st.info("Company profile changed. Cleared scouting/ingestion/due-diligence state.")
     st.session_state["selected_company_id"] = company_id
+    st.session_state["_active_company_id"] = company_id
     return company_id, store.get_company_profile(company_id), profiles
 
 
@@ -202,6 +203,11 @@ def page_scouting(store: SnowflakeStore, github: GitHubClient):
     if st.button("Run Scouting"):
         with st.spinner("Running scouting..."):
             result = run_scouting(store, github, company_id, profile, requirements)
+        # New scouting context invalidates previous selection/ingestion/report.
+        st.session_state["selected_repo"] = None
+        st.session_state["last_ingestion"] = None
+        st.session_state["last_dd"] = None
+        st.session_state["ingestion_job_id"] = None
         st.session_state["last_scout"] = result
         st.success(f"Scouting complete. scout_run_id={result['scout_run_id']}")
 
@@ -259,7 +265,12 @@ def page_scouting(store: SnowflakeStore, github: GitHubClient):
             if repo.get("constraint_warnings"):
                 st.warning(" | ".join(repo["constraint_warnings"]))
             if st.button(f"Proceed to Due Diligence: {repo['full_name']}", key=f"proceed_{i}"):
+                prev_repo = (st.session_state.get("selected_repo") or {}).get("full_name")
                 st.session_state["selected_repo"] = repo
+                if prev_repo != repo.get("full_name"):
+                    st.session_state["last_ingestion"] = None
+                    st.session_state["last_dd"] = None
+                    st.session_state["ingestion_job_id"] = None
                 st.success("Repository selected. Move to Repo Selection + Ingestion page.")
 
 
@@ -283,6 +294,12 @@ def page_ingestion(store: SnowflakeStore):
         st.caption("Expected indexing time: ~30 to 90 seconds. Caps indexing to ~50 key files plus small recent release/issues/discussions context.")
     force_reindex = st.checkbox("Force re-index (ignore existing ingestion)", value=False)
     st.caption("Background ingestion continues while you navigate between tabs.")
+
+    # Prevent stale ingestion from a different repo being reused in UI/report.
+    current_ing = st.session_state.get("last_ingestion") or {}
+    if current_ing and current_ing.get("repo_full_name") != repo.get("full_name"):
+        st.session_state["last_ingestion"] = None
+        st.session_state["last_dd"] = None
 
     existing = store.get_latest_ingestion(company_id=company_id, repo_full_name=repo["full_name"])
     if existing and not force_reindex:
@@ -311,17 +328,29 @@ def page_ingestion(store: SnowflakeStore):
             "reused": False,
             "status": "RUNNING",
         }
+        st.session_state["last_dd"] = None
         st.success(f"Background ingestion started. job_id={job['job_id']}")
 
     job_id = st.session_state.get("ingestion_job_id")
     if job_id:
-        job = store.get_ingestion_job(job_id)
-        if job:
-            st.write(f"Job status: **{job['status']}**")
-            st.progress(max(0, min(100, int(job.get("progress", 0.0) * 100))))
-            st.caption(job.get("message") or "")
+        status_placeholder = st.empty()
+        progress_placeholder = st.empty()
+        message_placeholder = st.empty()
+        chunks_placeholder = st.empty()
+        poll_hint = st.empty()
+        # Keep this render responsive while still giving live updates.
+        max_polls = int(os.getenv("INGEST_UI_MAX_POLLS", "25"))
+        poll_interval = float(os.getenv("INGEST_UI_POLL_INTERVAL_SEC", "1.2"))
+        for _ in range(max_polls):
+            job = store.get_ingestion_job(job_id)
+            if not job:
+                break
+            status_placeholder.write(f"Job status: **{job['status']}**")
+            progress_placeholder.progress(max(0, min(100, int(job.get("progress", 0.0) * 100))))
+            message_placeholder.caption(job.get("message") or "")
             chunks_so_far = store.count_evidence_chunks(job["ingest_run_id"])
-            st.caption(f"Chunks available so far: {chunks_so_far}")
+            chunks_placeholder.caption(f"Chunks available so far: {chunks_so_far}")
+
             if job["status"] == "COMPLETE":
                 latest = store.get_latest_ingestion(company_id=company_id, repo_full_name=repo["full_name"])
                 if latest:
@@ -334,8 +363,14 @@ def page_ingestion(store: SnowflakeStore):
                         "files_indexed": latest.get("files_indexed", 0),
                         "chunks_indexed": latest.get("chunks_indexed", 0),
                     }
+                poll_hint.success("Background indexing completed.")
+                break
             if job["status"] == "FAILED":
-                st.error(job.get("error") or "Ingestion failed.")
+                poll_hint.error(job.get("error") or "Ingestion failed.")
+                break
+
+            poll_hint.caption("Live polling indexing progress...")
+            time.sleep(poll_interval)
 
     if st.button("Run Repo Ingestion (Foreground)"):
         progress = st.progress(0)
@@ -360,6 +395,7 @@ def page_ingestion(store: SnowflakeStore):
             )
         progress.progress(100)
         st.session_state["last_ingestion"] = ingest
+        st.session_state["last_dd"] = None
         if ingest.get("reused"):
             st.success(f"Reused ingestion. ingest_run_id={ingest['ingest_run_id']}")
         else:
@@ -413,6 +449,10 @@ def page_due_diligence(store: SnowflakeStore):
     if not (company_id and profile and scout and repo and ingestion):
         st.info("Complete scouting + selection + ingestion first.")
         return
+    if ingestion.get("repo_full_name") != repo.get("full_name"):
+        st.warning("Selected repo and ingestion context do not match. Re-run ingestion for this repo.")
+        st.session_state["last_dd"] = None
+        return
 
     ingest_run_id = ingestion.get("ingest_run_id")
     if ingest_run_id:
@@ -442,6 +482,14 @@ def page_due_diligence(store: SnowflakeStore):
         return
 
     record = store.load_due_diligence(dd["dd_run_id"])
+    if (
+        record.get("repo_full_name") != repo.get("full_name")
+        or record.get("ingest_run_id") != ingest_run_id
+        or record.get("company_id") != company_id
+    ):
+        st.warning("Previous report belongs to a different company/repo/ingestion context. Run due diligence again.")
+        st.session_state["last_dd"] = None
+        return
     report = record.get("report_json", {})
     findings = record.get("findings", [])
 
@@ -600,12 +648,6 @@ def main():
                 "War Room Transcript",
             ],
         )
-        st.markdown("---")
-        _snowflake_banner(store)
-        st.markdown("---")
-        st.caption("Skyfire guardrails")
-        st.write(f"max_files={os.getenv('SKYFIRE_MAX_FILES', '160')}")
-        st.write(f"max_tokens={os.getenv('SKYFIRE_MAX_TOKENS', '120000')}")
 
     if page == "Company Onboarding":
         page_onboarding(store)
