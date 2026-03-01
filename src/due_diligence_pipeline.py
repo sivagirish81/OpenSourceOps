@@ -23,6 +23,18 @@ from src.due_diligence_agents import (
 from src.github_client import GitHubClient
 from src.llm_router import LLMRouter
 
+try:
+    from crewai import Agent as CrewAgent
+    from crewai import Crew, Task
+    from langchain.tools import StructuredTool
+    from langchain_openai import ChatOpenAI
+except Exception:  # pragma: no cover
+    CrewAgent = None
+    Crew = None
+    Task = None
+    StructuredTool = None
+    ChatOpenAI = None
+
 
 def _dialogue_for_agent_fallback(
     agent_name: str,
@@ -256,6 +268,218 @@ def _llm_enrich_findings(
         return None
 
 
+def _crewai_enabled() -> bool:
+    return bool(
+        os.getenv("ENABLE_CREWAI_RUNTIME", "0") == "1"
+        and CrewAgent
+        and Crew
+        and Task
+        and StructuredTool
+        and (
+            os.getenv("OPENAI_API_KEY")
+            or os.getenv("XAI_API_KEY")
+        )
+    )
+
+
+def _crewai_llm_from_env():
+    if ChatOpenAI is None:
+        return None
+    if os.getenv("OPENAI_API_KEY"):
+        return ChatOpenAI(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            temperature=0.1,
+        )
+    if os.getenv("XAI_API_KEY"):
+        return ChatOpenAI(
+            model=os.getenv("XAI_MODEL", "grok-2-latest"),
+            openai_api_base=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
+            openai_api_key=os.getenv("XAI_API_KEY"),
+            temperature=0.1,
+        )
+    return None
+
+
+def _run_due_diligence_with_crewai(
+    *,
+    company_profile: Dict[str, Any],
+    repo_meta: Dict[str, Any],
+    chunks: List[Dict[str, Any]],
+    requirements: str,
+) -> Dict[str, Any] | None:
+    """True CrewAI orchestration with task dependencies and tool-backed executors."""
+    if not _crewai_enabled():
+        return None
+    llm = _crewai_llm_from_env()
+    if llm is None:
+        return None
+
+    security_agent = SecuritySupplyChainAgent()
+    license_agent = LicenseComplianceAgent()
+    reliability_agent = ReliabilityOpsAgent()
+    architecture_agent = ArchitectureIntegrationAgent()
+    community_agent = CommunityMaintenanceAgent()
+    judge_agent = JudgeVerifierAgent()
+
+    state: Dict[str, Any] = {"findings": [], "task_outputs": []}
+
+    def _append_output(label: str, payload: Dict[str, Any]) -> str:
+        state["task_outputs"].append({"task": label, "output": payload})
+        return json.dumps(payload)
+
+    def run_security(request: str = "") -> str:
+        out = security_agent.run(company_profile, chunks, repo_meta["html_url"])
+        state["findings"].extend(out.findings)
+        return _append_output("security", {"agent_name": out.agent_name, "findings": out.findings, "notes": out.notes})
+
+    def run_license(request: str = "") -> str:
+        out = license_agent.run(company_profile, chunks, repo_meta["html_url"])
+        state["findings"].extend(out.findings)
+        return _append_output("license", {"agent_name": out.agent_name, "findings": out.findings, "notes": out.notes})
+
+    def run_reliability(request: str = "") -> str:
+        out = reliability_agent.run(company_profile, chunks, repo_meta["html_url"])
+        state["findings"].extend(out.findings)
+        return _append_output("reliability", {"agent_name": out.agent_name, "findings": out.findings, "notes": out.notes})
+
+    def run_architecture(request: str = "") -> str:
+        out = architecture_agent.run(company_profile, chunks, repo_meta["html_url"])
+        state["findings"].extend(out.findings)
+        return _append_output("architecture", {"agent_name": out.agent_name, "findings": out.findings, "notes": out.notes})
+
+    def run_community(request: str = "") -> str:
+        out = community_agent.run(company_profile, repo_meta, repo_meta["html_url"])
+        state["findings"].extend(out.findings)
+        return _append_output("community", {"agent_name": out.agent_name, "findings": out.findings, "notes": out.notes})
+
+    def run_judge(request: str = "") -> str:
+        report = judge_agent.run(
+            company_profile=company_profile,
+            findings=state["findings"],
+            repo_full_name=repo_meta["full_name"],
+            requirements=requirements,
+        )
+        return _append_output("judge", {"report": report})
+
+    sec_tool = StructuredTool.from_function(
+        func=run_security,
+        name="run_security_supply_chain_agent",
+        description="Run security and supply chain analysis using company profile, requirements, and repo evidence.",
+    )
+    lic_tool = StructuredTool.from_function(
+        func=run_license,
+        name="run_license_compliance_agent",
+        description="Run license and legal compliance analysis using company profile, requirements, and repo evidence.",
+    )
+    rel_tool = StructuredTool.from_function(
+        func=run_reliability,
+        name="run_reliability_ops_agent",
+        description="Run reliability and operations analysis using company profile, requirements, and repo evidence.",
+    )
+    arch_tool = StructuredTool.from_function(
+        func=run_architecture,
+        name="run_architecture_integration_agent",
+        description="Run architecture/integration analysis using company profile, requirements, and repo evidence.",
+    )
+    comm_tool = StructuredTool.from_function(
+        func=run_community,
+        name="run_community_maintenance_agent",
+        description="Run community maintenance and support analysis using company profile and requirements.",
+    )
+    judge_tool = StructuredTool.from_function(
+        func=run_judge,
+        name="run_judge_verifier_agent",
+        description="Aggregate and judge all findings into final due diligence report.",
+    )
+
+    company_context = (
+        f"requirements={requirements}\n"
+        f"company_profile={json.dumps(company_profile)}\n"
+        f"repo={repo_meta.get('full_name')}\n"
+    )
+
+    sec_a = CrewAgent(role="SecuritySupplyChainAgent", goal="Produce grounded security finding JSON.", backstory="Security due diligence specialist.", llm=llm, tools=[sec_tool], allow_delegation=False)
+    lic_a = CrewAgent(role="LicenseComplianceAgent", goal="Produce grounded license finding JSON.", backstory="Legal/OSS compliance specialist.", llm=llm, tools=[lic_tool], allow_delegation=False)
+    rel_a = CrewAgent(role="ReliabilityOpsAgent", goal="Produce grounded reliability finding JSON.", backstory="SRE and production ops specialist.", llm=llm, tools=[rel_tool], allow_delegation=False)
+    arch_a = CrewAgent(role="ArchitectureIntegrationAgent", goal="Produce grounded integration finding JSON.", backstory="Architecture integration specialist.", llm=llm, tools=[arch_tool], allow_delegation=False)
+    comm_a = CrewAgent(role="CommunityMaintenanceAgent", goal="Produce grounded community/support finding JSON.", backstory="Open-source maintenance specialist.", llm=llm, tools=[comm_tool], allow_delegation=False)
+    judge_a = CrewAgent(role="JudgeVerifierAgent", goal="Produce final due diligence report JSON.", backstory="Evidence verifier and decision maker.", llm=llm, tools=[judge_tool], allow_delegation=False)
+
+    t1 = Task(
+        description=company_context + "Call tool run_security_supply_chain_agent and return the JSON output only.",
+        expected_output="JSON output from run_security_supply_chain_agent",
+        agent=sec_a,
+        tools=[sec_tool],
+    )
+    t2 = Task(
+        description=company_context + "Use previous context and call tool run_license_compliance_agent. Return JSON only.",
+        expected_output="JSON output from run_license_compliance_agent",
+        agent=lic_a,
+        tools=[lic_tool],
+        context=[t1],
+    )
+    t3 = Task(
+        description=company_context + "Use previous context and call tool run_reliability_ops_agent. Return JSON only.",
+        expected_output="JSON output from run_reliability_ops_agent",
+        agent=rel_a,
+        tools=[rel_tool],
+        context=[t1, t2],
+    )
+    t4 = Task(
+        description=company_context + "Use previous context and call tool run_architecture_integration_agent. Return JSON only.",
+        expected_output="JSON output from run_architecture_integration_agent",
+        agent=arch_a,
+        tools=[arch_tool],
+        context=[t1, t2, t3],
+    )
+    t5 = Task(
+        description=company_context + "Use previous context and call tool run_community_maintenance_agent. Return JSON only.",
+        expected_output="JSON output from run_community_maintenance_agent",
+        agent=comm_a,
+        tools=[comm_tool],
+        context=[t1, t2, t3, t4],
+    )
+    t6 = Task(
+        description=company_context + "Use all previous context and call tool run_judge_verifier_agent. Return JSON only.",
+        expected_output="JSON output from run_judge_verifier_agent",
+        agent=judge_a,
+        tools=[judge_tool],
+        context=[t1, t2, t3, t4, t5],
+    )
+
+    crew = Crew(
+        agents=[sec_a, lic_a, rel_a, arch_a, comm_a, judge_a],
+        tasks=[t1, t2, t3, t4, t5, t6],
+        verbose=False,
+    )
+    try:
+        _ = crew.kickoff()
+    except Exception:
+        return None
+
+    if not state["findings"]:
+        return None
+    # Judge tool may fail to execute; fall back locally if report missing.
+    report = None
+    for item in reversed(state["task_outputs"]):
+        if item["task"] == "judge":
+            report = (item.get("output") or {}).get("report")
+            break
+    if not report:
+        report = judge_agent.run(
+            company_profile=company_profile,
+            findings=state["findings"],
+            repo_full_name=repo_meta["full_name"],
+            requirements=requirements,
+        )
+    return {
+        "findings": state["findings"],
+        "report": report,
+        "task_outputs": state["task_outputs"],
+    }
+
+
 def _rerank_with_cortex_if_available(
     store: SnowflakeStore,
     requirements: str,
@@ -464,72 +688,99 @@ def run_due_diligence(
         CommunityMaintenanceAgent(),
     ]
     findings: List[Dict[str, Any]] = []
-    for idx, agent in enumerate(agents):
-        if isinstance(agent, CommunityMaintenanceAgent):
-            out = agent.run(company_profile, repo_meta, repo_meta["html_url"])
-        else:
-            out = agent.run(company_profile, chunks, repo_meta["html_url"])
-        evidence_cards = _evidence_summary(chunks)
-        enriched = None
-        if llm.enabled():
-            enriched = _llm_enrich_findings(
-                llm,
-                agent_name=out.agent_name,
-                requirements=requirements,
-                company_profile=company_profile,
-                repo_meta=repo_meta,
-                evidence=evidence_cards,
-                deterministic_findings=out.findings,
-            )
-        if enriched:
-            out.findings = enriched
-            out.notes = {**(out.notes or {}), "reasoning_mode": "llm_enriched"}
-        else:
-            out.notes = {**(out.notes or {}), "reasoning_mode": "deterministic"}
-        findings.extend(out.findings)
-        store.save_transcript(
-            dd_run_id=dd_run_id,
-            agent_name=out.agent_name,
-            step="analysis",
-            status="SUCCESS",
-            payload={"notes": out.notes, "finding_count": len(out.findings)},
-        )
-        store.save_transcript(
-            dd_run_id=dd_run_id,
-            agent_name=out.agent_name,
-            step="war_room_dialogue",
-            status="INFO",
-            payload=(
-                _llm_conversation(
-                    llm,
-                    agent_name=out.agent_name,
-                    repo_name=repo_meta["full_name"],
-                    requirements=requirements,
-                    notes=out.notes,
-                    findings=out.findings,
-                    company_profile=company_profile,
-                    next_agent=(agents[idx + 1].name if idx + 1 < len(agents) else None),
-                    peer_agent=(agents[idx - 1].name if idx - 1 >= 0 else None),
-                )
-                or _dialogue_for_agent_fallback(
-                    agent_name=out.agent_name,
-                    repo_name=repo_meta["full_name"],
-                    notes=out.notes,
-                    findings=out.findings,
-                    next_agent=(agents[idx + 1].name if idx + 1 < len(agents) else None),
-                    peer_agent=(agents[idx - 1].name if idx - 1 >= 0 else None),
-                )
-            ),
-        )
-        store.save_findings_batch(dd_run_id, out.findings)
+    report = None
 
-    judge = JudgeVerifierAgent()
-    report = judge.run(
+    crew_result = _run_due_diligence_with_crewai(
         company_profile=company_profile,
-        findings=findings,
-        repo_full_name=repo_meta["full_name"],
+        repo_meta=repo_meta,
+        chunks=chunks,
         requirements=requirements,
     )
+    if crew_result:
+        findings = crew_result["findings"]
+        report = crew_result["report"]
+        store.save_transcript(
+            dd_run_id=dd_run_id,
+            agent_name="CrewAI",
+            step="orchestration",
+            status="SUCCESS",
+            payload={
+                "mode": "crewai",
+                "task_outputs": crew_result.get("task_outputs", []),
+                "finding_count": len(findings),
+            },
+        )
+    else:
+        for idx, agent in enumerate(agents):
+            if isinstance(agent, CommunityMaintenanceAgent):
+                out = agent.run(company_profile, repo_meta, repo_meta["html_url"])
+            else:
+                out = agent.run(company_profile, chunks, repo_meta["html_url"])
+            evidence_cards = _evidence_summary(chunks)
+            enriched = None
+            if llm.enabled():
+                enriched = _llm_enrich_findings(
+                    llm,
+                    agent_name=out.agent_name,
+                    requirements=requirements,
+                    company_profile=company_profile,
+                    repo_meta=repo_meta,
+                    evidence=evidence_cards,
+                    deterministic_findings=out.findings,
+                )
+            if enriched:
+                out.findings = enriched
+                out.notes = {**(out.notes or {}), "reasoning_mode": "llm_enriched"}
+            else:
+                out.notes = {**(out.notes or {}), "reasoning_mode": "deterministic"}
+            findings.extend(out.findings)
+            store.save_transcript(
+                dd_run_id=dd_run_id,
+                agent_name=out.agent_name,
+                step="analysis",
+                status="SUCCESS",
+                payload={"notes": out.notes, "finding_count": len(out.findings)},
+            )
+            store.save_transcript(
+                dd_run_id=dd_run_id,
+                agent_name=out.agent_name,
+                step="war_room_dialogue",
+                status="INFO",
+                payload=(
+                    _llm_conversation(
+                        llm,
+                        agent_name=out.agent_name,
+                        repo_name=repo_meta["full_name"],
+                        requirements=requirements,
+                        notes=out.notes,
+                        findings=out.findings,
+                        company_profile=company_profile,
+                        next_agent=(agents[idx + 1].name if idx + 1 < len(agents) else None),
+                        peer_agent=(agents[idx - 1].name if idx - 1 >= 0 else None),
+                    )
+                    or _dialogue_for_agent_fallback(
+                        agent_name=out.agent_name,
+                        repo_name=repo_meta["full_name"],
+                        notes=out.notes,
+                        findings=out.findings,
+                        next_agent=(agents[idx + 1].name if idx + 1 < len(agents) else None),
+                        peer_agent=(agents[idx - 1].name if idx - 1 >= 0 else None),
+                    )
+                ),
+            )
+            store.save_findings_batch(dd_run_id, out.findings)
+
+    judge = JudgeVerifierAgent()
+    if not report:
+        report = judge.run(
+            company_profile=company_profile,
+            findings=findings,
+            repo_full_name=repo_meta["full_name"],
+            requirements=requirements,
+        )
+    # Ensure findings persisted when produced via crew-mode.
+    if crew_result:
+        store.save_findings_batch(dd_run_id, findings)
     report_md = report_to_markdown(report)
     store.save_transcript(
         dd_run_id=dd_run_id,
